@@ -6,6 +6,7 @@ on:
     - master
   pull_request:
     paths:
+    - .github/actions/prepare/action.yml
     - .github/workflows/e2e-webpack-workflow.yml
     - scripts/e2e-setup-ci.sh
 
@@ -16,16 +17,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@master
+    - uses: actions/checkout@v4
 
-    - name: 'Use Node.js 10.x'
-      uses: actions/setup-node@master
-      with:
-        node-version: 10.x
-
-    - name: 'Build the standard bundle'
-      run: |
-        node ./scripts/run-yarn.js build:cli
+    - uses: ./.github/actions/prepare
 
     - name: 'Vanilla Webpack'
       run: |
@@ -38,11 +32,11 @@ jobs:
 
         mkdir src
         echo "import _ from 'lodash';function printHello() { console.log(_.join(['Hello', 'webpack'], ' '))}; printHello();" | tee src/index.js
-        
+
         yarn webpack info
         yarn webpack
         [[ "$(node dist/main.js)" = "Hello webpack" ]]
-        
+
     - name: 'raw-loader'
       run: |
         source scripts/e2e-setup-ci.sh
@@ -57,6 +51,8 @@ jobs:
         yarn webpack info
         yarn webpack
         [[ "$(node dist/main.js)" = "Hello raw-loader" ]]
+      if: |
+        success() || failure()
 
     - name: 'ts-loader'
       run: |
@@ -75,6 +71,8 @@ jobs:
         yarn webpack info
         yarn webpack
         [[ "$(node dist/main.js)" = "Hello ts-loader" ]]
+      if: |
+        success() || failure()
 
     - name: 'less-loader'
       run: |
@@ -96,9 +94,15 @@ jobs:
         ls dist | grep "main.js"
         ls dist | grep ".svg"
         ls dist | grep ".woff2"
+      if: |
+        success() || failure()
 
     - name: 'less-loader + thread-loader'
       run: |
+        # Thread-loader didn't get updated to support getOptions, causing it to break w/ less-loader
+        # Ref https://github.com/webpack-contrib/thread-loader/issues/106
+        exit 0
+
         source scripts/e2e-setup-ci.sh
 
         yarn init -p
@@ -117,3 +121,5 @@ jobs:
         ls dist | grep "main.js"
         ls dist | grep ".svg"
         ls dist | grep ".woff2"
+      if: |
+        success() || failure()

@@ -1,22 +1,13 @@
-import {BaseCommand, WorkspaceRequiredError}                              from '@yarnpkg/cli';
-import {Cache, Configuration, Manifest, Project, StreamReport, Workspace} from '@yarnpkg/core';
-import {structUtils}                                                      from '@yarnpkg/core';
-import {Command, Usage}                                                   from 'clipanion';
-import * as yup                                                           from 'yup';
+import {BaseCommand, WorkspaceRequiredError}                from '@yarnpkg/cli';
+import {Cache, Configuration, Manifest, Project, Workspace} from '@yarnpkg/core';
+import {structUtils}                                        from '@yarnpkg/core';
+import {Command, Option, Usage}                             from 'clipanion';
 
 // eslint-disable-next-line arca/no-default-export
-export default class WorkspacesFocus extends BaseCommand {
-  @Command.Rest()
-  workspaces: Array<string> = [];
-
-  @Command.Boolean(`--json`, {description: `Format the output as an NDJSON stream`})
-  json: boolean = false;
-
-  @Command.Boolean(`--production`, {description: `Only install regular dependencies by omitting dev dependencies`})
-  production: boolean = false;
-
-  @Command.Boolean(`-A,--all`, {description: `Install the entire project`})
-  all: boolean = false;
+export default class WorkspacesFocusCommand extends BaseCommand {
+  static paths = [
+    [`workspaces`, `focus`],
+  ];
 
   static usage: Usage = Command.Usage({
     category: `Workspace-related commands`,
@@ -30,20 +21,28 @@ export default class WorkspacesFocus extends BaseCommand {
     `,
   });
 
-  static schema = yup.object().shape({
-    all: yup.bool(),
-    workspaces: yup.array().when(`all`, {
-      is: true,
-      then: yup.array().max(0, `Cannot specify workspaces when using the --all flag`),
-      otherwise: yup.array(),
-    }),
+  json = Option.Boolean(`--json`, false, {
+    description: `Format the output as an NDJSON stream`,
   });
 
-  @Command.Path(`workspaces`, `focus`)
+  production = Option.Boolean(`--production`, false, {
+    description: `Only install regular dependencies by omitting dev dependencies`,
+  });
+
+  all = Option.Boolean(`-A,--all`, false, {
+    description: `Install the entire project`,
+  });
+
+  workspaces = Option.Rest();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace} = await Project.find(configuration, this.context.cwd);
     const cache = await Cache.find(configuration);
+
+    await project.restoreInstallState({
+      restoreResolutions: false,
+    });
 
     let requiredWorkspaces: Set<Workspace>;
     if (this.all) {
@@ -66,7 +65,7 @@ export default class WorkspacesFocus extends BaseCommand {
     // iterating over it (because they're added at the end)
 
     for (const workspace of requiredWorkspaces) {
-      for (const dependencyType of Manifest.hardDependencies) {
+      for (const dependencyType of this.production ? [`dependencies`] : Manifest.hardDependencies) {
         for (const descriptor of workspace.manifest.getForScope(dependencyType).values()) {
           const matchingWorkspace = project.tryWorkspaceByDescriptor(descriptor);
 
@@ -87,6 +86,8 @@ export default class WorkspacesFocus extends BaseCommand {
           workspace.manifest.devDependencies.clear();
         }
       } else {
+        workspace.manifest.installConfig = workspace.manifest.installConfig || {};
+        workspace.manifest.installConfig.selfReferences = false;
         workspace.manifest.dependencies.clear();
         workspace.manifest.devDependencies.clear();
         workspace.manifest.peerDependencies.clear();
@@ -98,15 +99,12 @@ export default class WorkspacesFocus extends BaseCommand {
     // persist the project state on the disk (otherwise all workspaces would
     // lose their dependencies!).
 
-    const report = await StreamReport.start({
-      configuration,
+    return await project.installWithNewReport({
       json: this.json,
       stdout: this.context.stdout,
-      includeLogs: true,
-    }, async (report: StreamReport) => {
-      await project.install({cache, report, persistProject: false});
+    }, {
+      cache,
+      persistProject: false,
     });
-
-    return report.exitCode();
   }
 }

@@ -12,37 +12,18 @@
  * (which also provides a safe-guard in case virtual descriptors ever make their way into the dedupe algorithm).
  */
 
-import {BaseCommand}                                 from '@yarnpkg/cli';
-import {Configuration, Project, Cache, StreamReport} from '@yarnpkg/core';
-import {Command}                                     from 'clipanion';
-import * as yup                                      from 'yup';
+import {BaseCommand}                                              from '@yarnpkg/cli';
+import {Configuration, Project, Cache, StreamReport, InstallMode} from '@yarnpkg/core';
+import {Command, Option}                                          from 'clipanion';
+import * as t                                                     from 'typanion';
 
-import * as dedupeUtils                              from '../dedupeUtils';
+import * as dedupeUtils                                           from '../dedupeUtils';
 
 // eslint-disable-next-line arca/no-default-export
 export default class DedupeCommand extends BaseCommand {
-  @Command.Rest()
-  patterns: Array<string> = [];
-
-  @Command.String(`-s,--strategy`, {description: `The strategy to use when deduping dependencies`})
-  strategy: dedupeUtils.Strategy = dedupeUtils.Strategy.HIGHEST;
-
-  @Command.Boolean(`-c,--check`, {description: `Exit with exit code 1 when duplicates are found, without persisting the dependency tree`})
-  check: boolean = false;
-
-  @Command.Boolean(`--json`, {description: `Format the output as an NDJSON stream`})
-  json: boolean = false;
-
-  static schema = yup.object().shape({
-    strategy: yup.string().test({
-      name: `strategy`,
-      message: `\${path} must be one of \${strategies}`,
-      params: {strategies: [...dedupeUtils.acceptedStrategies].join(`, `)},
-      test: (strategy: string) => {
-        return dedupeUtils.acceptedStrategies.has(strategy as dedupeUtils.Strategy);
-      },
-    }),
-  });
+  static paths = [
+    [`dedupe`],
+  ];
 
   static usage = Command.Usage({
     description: `deduplicate dependencies with overlapping ranges`,
@@ -56,6 +37,12 @@ export default class DedupeCommand extends BaseCommand {
       **Note:** Even though it never produces a wrong dependency tree, this command should be used with caution, as it modifies the dependency tree, which can sometimes cause problems when packages don't strictly follow semver recommendations. Because of this, it is recommended to also review the changes manually.
 
       If set, the \`-c,--check\` flag will only report the found duplicates, without persisting the modified dependency tree. If changes are found, the command will exit with a non-zero exit code, making it suitable for CI purposes.
+
+      If the \`--mode=<mode>\` option is set, Yarn will change which artifacts are generated. The modes currently supported are:
+
+      - \`skip-build\` will not run the build scripts at all. Note that this is different from setting \`enableScripts\` to false because the latter will disable build scripts, and thus affect the content of the artifacts generated on disk, whereas the former will just disable the build step - but not the scripts themselves, which just won't run.
+
+      - \`update-lockfile\` will skip the link step altogether, and only fetch packages that are missing from the lockfile (or that have no associated checksums). This mode is typically used by tools like Renovate or Dependabot to keep a lockfile up-to-date without incurring the full install cost.
 
       This command accepts glob patterns as arguments (if valid Idents and supported by [micromatch](https://github.com/micromatch/micromatch)). Make sure to escape the patterns, to prevent your own shell from trying to expand them.
 
@@ -87,11 +74,34 @@ export default class DedupeCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`dedupe`)
+  strategy = Option.String(`-s,--strategy`, dedupeUtils.Strategy.HIGHEST, {
+    description: `The strategy to use when deduping dependencies`,
+    validator: t.isEnum(dedupeUtils.Strategy),
+  });
+
+  check = Option.Boolean(`-c,--check`, false, {
+    description: `Exit with exit code 1 when duplicates are found, without persisting the dependency tree`,
+  });
+
+  json = Option.Boolean(`--json`, false, {
+    description: `Format the output as an NDJSON stream`,
+  });
+
+  mode = Option.String(`--mode`, {
+    description: `Change what artifacts installs generate`,
+    validator: t.isEnum(InstallMode),
+  });
+
+  patterns = Option.Rest();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project} = await Project.find(configuration, this.context.cwd);
     const cache = await Cache.find(configuration);
+
+    await project.restoreInstallState({
+      restoreResolutions: false,
+    });
 
     let dedupedPackageCount: number = 0;
     const dedupeReport = await StreamReport.start({
@@ -109,15 +119,13 @@ export default class DedupeCommand extends BaseCommand {
     if (this.check) {
       return dedupedPackageCount ? 1 : 0;
     } else {
-      const installReport = await StreamReport.start({
-        configuration,
-        stdout: this.context.stdout,
+      return await project.installWithNewReport({
         json: this.json,
-      }, async report => {
-        await project.install({cache, report});
+        stdout: this.context.stdout,
+      }, {
+        cache,
+        mode: this.mode,
       });
-
-      return installReport.exitCode();
     }
   }
 }

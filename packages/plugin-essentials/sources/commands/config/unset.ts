@@ -1,16 +1,15 @@
 import {BaseCommand}                              from '@yarnpkg/cli';
 import {Configuration, StreamReport, MessageName} from '@yarnpkg/core';
-import {Command, Usage, UsageError}               from 'clipanion';
+import {Command, Option, Usage, UsageError}       from 'clipanion';
 import cloneDeep                                  from 'lodash/cloneDeep';
+import hasPath                                    from 'lodash/has';
 import unsetPath                                  from 'lodash/unset';
 
 // eslint-disable-next-line arca/no-default-export
 export default class ConfigUnsetCommand extends BaseCommand {
-  @Command.String()
-  name!: string;
-
-  @Command.Boolean(`-H,--home`, {description: `Update the home configuration instead of the project configuration`})
-  home: boolean = false;
+  static paths = [
+    [`config`, `unset`],
+  ];
 
   static usage: Usage = Command.Usage({
     description: `unset a configuration setting`,
@@ -29,11 +28,21 @@ export default class ConfigUnsetCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`config`, `unset`)
+  home = Option.Boolean(`-H,--home`, false, {
+    description: `Update the home configuration instead of the project configuration`,
+  });
+
+  name = Option.String();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
-    if (!configuration.projectCwd)
-      throw new UsageError(`This command must be run from within a project folder`);
+
+    const assertProjectCwd = () => {
+      if (!configuration.projectCwd)
+        throw new UsageError(`This command must be run from within a project folder`);
+
+      return configuration.projectCwd;
+    };
 
     const name = this.name.replace(/[.[].*$/, ``);
     const path = this.name.replace(/^[^.[]*\.?/, ``);
@@ -42,28 +51,36 @@ export default class ConfigUnsetCommand extends BaseCommand {
     if (typeof setting === `undefined`)
       throw new UsageError(`Couldn't find a configuration settings named "${name}"`);
 
-    const updateConfiguration: (patch: ((current: any) => any)) => Promise<void> =
+    const updateConfiguration: (patch: ((current: any) => any)) => Promise<boolean> =
       this.home
         ? patch => Configuration.updateHomeConfiguration(patch)
-        : patch => Configuration.updateConfiguration(configuration.projectCwd!, patch);
-
-    await updateConfiguration(current => {
-      if (path) {
-        const clone = cloneDeep(current);
-        unsetPath(clone, this.name);
-        return clone;
-      } else {
-        const next = unsetPath({...current}, name);
-        return next;
-      }
-    });
+        : patch => Configuration.updateConfiguration(assertProjectCwd(), patch);
 
     const report = await StreamReport.start({
       configuration,
       includeFooter: false,
       stdout: this.context.stdout,
     }, async report => {
-      report.reportInfo(MessageName.UNNAMED, `Successfully unset ${this.name}`);
+      let bailedOutEarly = false;
+      await updateConfiguration(current => {
+        if (!hasPath(current, this.name)) {
+          report.reportWarning(MessageName.UNNAMED, `Configuration doesn't contain setting ${this.name}; there is nothing to unset`);
+          bailedOutEarly = true;
+          return current;
+        }
+
+        const clone = path
+          ? cloneDeep(current)
+          : {...current};
+
+        unsetPath(clone, this.name);
+        return clone;
+      });
+
+      // We can't show the success message in the callback as we must first wait for the new configuration to be persisted
+      if (!bailedOutEarly) {
+        report.reportInfo(MessageName.UNNAMED, `Successfully unset ${this.name}`);
+      }
     });
 
     return report.exitCode();
